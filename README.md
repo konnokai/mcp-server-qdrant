@@ -25,14 +25,30 @@ It acts as a semantic memory layer on top of the Qdrant database.
      - `metadata` (JSON): Optional metadata to store
      - `collection_name` (string): Name of the collection to store the information in. This field is required if there are no default collection name.
                                    If there is a default collection name, this field is not enabled.
-   - Returns: Confirmation message
+   - Returns: Confirmation message containing the new point ID
 2. `qdrant-find`
    - Retrieve relevant information from the Qdrant database
    - Input:
      - `query` (string): Query to use for searching
      - `collection_name` (string): Name of the collection to store the information in. This field is required if there are no default collection name.
                                    If there is a default collection name, this field is not enabled.
-   - Returns: Information stored in the Qdrant database as separate messages
+   - Returns: Information stored in the Qdrant database, including point IDs, as separate messages
+3. `qdrant-edit`
+   - Update an existing memory by its point ID
+   - Input:
+     - `point_id` (string or integer): ID returned by `qdrant-find` or `qdrant-store`
+     - `information` (string): Replacement information to store
+     - `metadata` (JSON): Optional replacement metadata. Existing metadata is preserved when omitted.
+     - `collection_name` (string): Name of the collection containing the memory. This field is required if there is no default collection name.
+                                    If there is a default collection name, this field is not enabled.
+   - Returns: Confirmation message, or a not-found message when the point does not exist
+4. `qdrant-delete`
+   - Delete an existing memory by its point ID
+   - Input:
+     - `point_id` (string or integer): ID returned by `qdrant-find` or `qdrant-store`
+     - `collection_name` (string): Name of the collection containing the memory. This field is required if there is no default collection name.
+                                    If there is a default collection name, this field is not enabled.
+   - Returns: Confirmation message, or a not-found message when the point does not exist
 
 ## Environment Variables
 
@@ -50,9 +66,11 @@ Configuration is done via environment variables. The only command-line argument 
 | `EMBEDDING_PROVIDER`     | Embedding provider to use (currently only "fastembed" is supported) | `fastembed`                                                       |
 | `EMBEDDING_MODEL`        | Name of the embedding model to use                                  | `sentence-transformers/all-MiniLM-L6-v2`                          |
 | `TOOL_STORE_DESCRIPTION` | Custom description for the store tool                               | See default in [`settings.py`](src/mcp_server_qdrant/settings.py) |
+| `TOOL_EDIT_DESCRIPTION`  | Custom description for the edit tool                                | See default in [`settings.py`](src/mcp_server_qdrant/settings.py) |
+| `TOOL_DELETE_DESCRIPTION` | Custom description for the delete tool                             | See default in [`settings.py`](src/mcp_server_qdrant/settings.py) |
 | `TOOL_FIND_DESCRIPTION`  | Custom description for the find tool                                | See default in [`settings.py`](src/mcp_server_qdrant/settings.py) |
 | `QDRANT_SEARCH_LIMIT`    | Maximum number of results to return from search                     | `10`                                                              |
-| `QDRANT_READ_ONLY`       | Enable read-only mode (disables `qdrant-store` tool)                | `false`                                                           |
+| `QDRANT_READ_ONLY`       | Enable read-only mode (disables store, edit, and delete tools)      | `false`                                                           |
 
 ### FastMCP Environment Variables
 

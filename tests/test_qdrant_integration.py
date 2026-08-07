@@ -37,13 +37,14 @@ async def test_store_and_search(qdrant_connector):
         content="The quick brown fox jumps over the lazy dog",
         metadata={"source": "test", "importance": "high"},
     )
-    await qdrant_connector.store(test_entry)
+    point_id = await qdrant_connector.store(test_entry)
 
     # Search for the entry
     results = await qdrant_connector.search("fox jumps")
 
     # Verify results
     assert len(results) == 1
+    assert results[0].id == point_id
     assert results[0].content == test_entry.content
     assert results[0].metadata == test_entry.metadata
 
@@ -236,3 +237,140 @@ async def test_nonexistent_collection_search(qdrant_connector):
 
     # Verify results
     assert len(results) == 0
+
+
+@pytest.mark.asyncio
+async def test_edit_updates_entry_by_id(qdrant_connector):
+    """Test editing content and metadata without changing the point ID."""
+    point_id = await qdrant_connector.store(
+        Entry(
+            content="Paris is the capital of France",
+            metadata={"source": "atlas", "version": 1},
+        )
+    )
+
+    updated = await qdrant_connector.edit(
+        point_id,
+        Entry(
+            content="Paris is the capital and largest city of France",
+            metadata={"source": "atlas", "version": 2},
+        ),
+    )
+
+    assert updated is not None
+    assert updated.id == point_id
+    assert updated.content == "Paris is the capital and largest city of France"
+    assert updated.metadata == {"source": "atlas", "version": 2}
+
+    results = await qdrant_connector.search("largest city of France")
+    assert len(results) == 1
+    assert results[0] == updated
+
+    count = await qdrant_connector._client.count(
+        collection_name=qdrant_connector._default_collection_name,
+        exact=True,
+    )
+    assert count.count == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_preserves_metadata_when_omitted(qdrant_connector):
+    """Test editing content while preserving existing metadata."""
+    metadata = {"source": "encyclopedia", "verified": True}
+    point_id = await qdrant_connector.store(
+        Entry(content="Mercury is closest to the Sun", metadata=metadata)
+    )
+
+    updated = await qdrant_connector.edit(
+        point_id,
+        Entry(content="Mercury is the smallest planet in the Solar System"),
+    )
+
+    assert updated is not None
+    assert updated.id == point_id
+    assert updated.metadata == metadata
+
+
+@pytest.mark.asyncio
+async def test_edit_missing_point_or_collection_returns_none(qdrant_connector):
+    """Test editing does not insert a point when the target does not exist."""
+    missing_id = uuid.uuid4().hex
+    missing_collection = f"missing_{uuid.uuid4().hex}"
+
+    assert await qdrant_connector.edit(missing_id, Entry(content="Replacement")) is None
+    assert (
+        await qdrant_connector.edit(
+            missing_id,
+            Entry(content="Replacement"),
+            collection_name=missing_collection,
+        )
+        is None
+    )
+    assert not await qdrant_connector._client.collection_exists(missing_collection)
+
+
+@pytest.mark.asyncio
+async def test_delete_removes_only_requested_id(qdrant_connector):
+    """Test deleting one point by ID preserves other entries."""
+    delete_id = await qdrant_connector.store(
+        Entry(content="This memory should be deleted", metadata={"temporary": True})
+    )
+    keep_id = await qdrant_connector.store(
+        Entry(content="This memory should remain", metadata={"temporary": False})
+    )
+
+    deleted = await qdrant_connector.delete(delete_id)
+
+    assert deleted is not None
+    assert deleted.id == delete_id
+    assert deleted.content == "This memory should be deleted"
+    assert deleted.metadata == {"temporary": True}
+
+    remaining = await qdrant_connector.search("memory should remain")
+    assert len(remaining) == 1
+    assert remaining[0].id == keep_id
+    assert await qdrant_connector.delete(delete_id) is None
+
+
+@pytest.mark.asyncio
+async def test_edit_and_delete_in_custom_collection(qdrant_connector):
+    """Test ID-based mutations respect an explicitly selected collection."""
+    custom_collection = f"custom_{uuid.uuid4().hex}"
+    point_id = await qdrant_connector.store(
+        Entry(content="Original custom memory"),
+        collection_name=custom_collection,
+    )
+
+    updated = await qdrant_connector.edit(
+        point_id,
+        Entry(content="Updated custom memory"),
+        collection_name=custom_collection,
+    )
+    assert updated is not None
+    assert updated.id == point_id
+
+    deleted = await qdrant_connector.delete(
+        point_id,
+        collection_name=custom_collection,
+    )
+    assert deleted == updated
+    assert (
+        await qdrant_connector.search(
+            "custom memory", collection_name=custom_collection
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_missing_collection_returns_none(qdrant_connector):
+    """Test deleting from a nonexistent collection is a no-op."""
+    missing_collection = f"missing_{uuid.uuid4().hex}"
+
+    deleted = await qdrant_connector.delete(
+        uuid.uuid4().hex,
+        collection_name=missing_collection,
+    )
+
+    assert deleted is None
+    assert not await qdrant_connector._client.collection_exists(missing_collection)

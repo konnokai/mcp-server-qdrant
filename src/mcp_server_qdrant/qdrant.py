@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 Metadata = dict[str, Any]
 ArbitraryFilter = dict[str, Any]
+PointId = str | int
+
+
+def _normalize_point_id(point_id: str | int | uuid.UUID) -> PointId:
+    """Convert Qdrant's UUID objects into MCP-compatible string IDs."""
+    return str(point_id) if isinstance(point_id, uuid.UUID) else point_id
 
 
 class Entry(BaseModel):
@@ -19,6 +25,7 @@ class Entry(BaseModel):
     A single entry in the Qdrant collection.
     """
 
+    id: PointId | None = None
     content: str
     metadata: Metadata | None = None
 
@@ -60,7 +67,9 @@ class QdrantConnector:
         response = await self._client.get_collections()
         return [collection.name for collection in response.collections]
 
-    async def store(self, entry: Entry, *, collection_name: str | None = None):
+    async def store(
+        self, entry: Entry, *, collection_name: str | None = None
+    ) -> PointId:
         """
         Store some information in the Qdrant collection, along with the specified metadata.
         :param entry: The entry to store in the Qdrant collection.
@@ -79,16 +88,18 @@ class QdrantConnector:
         # Add to Qdrant
         vector_name = self._embedding_provider.get_vector_name()
         payload = {"document": entry.content, METADATA_PATH: entry.metadata}
+        point_id = uuid.uuid4().hex
         await self._client.upsert(
             collection_name=collection_name,
             points=[
                 models.PointStruct(
-                    id=uuid.uuid4().hex,
+                    id=point_id,
                     vector={vector_name: embeddings[0]},
                     payload=payload,
                 )
             ],
         )
+        return point_id
 
     async def search(
         self,
@@ -131,11 +142,108 @@ class QdrantConnector:
 
         return [
             Entry(
+                id=_normalize_point_id(result.id),
                 content=result.payload["document"],
                 metadata=result.payload.get("metadata"),
             )
             for result in search_results.points
         ]
+
+    async def edit(
+        self,
+        point_id: PointId,
+        entry: Entry,
+        *,
+        collection_name: str | None = None,
+    ) -> Entry | None:
+        """
+        Replace an existing entry identified by its point ID.
+        The replacement content is re-embedded, while existing metadata is preserved
+        when no replacement metadata is provided.
+        :param point_id: The ID of the point to edit.
+        :param entry: The replacement entry.
+        :param collection_name: The collection containing the point, optional. If not provided,
+                                the default collection is used.
+        :return: The updated entry, or None if the collection or point does not exist.
+        """
+        collection_name = collection_name or self._default_collection_name
+        assert collection_name is not None
+        if not await self._client.collection_exists(collection_name):
+            return None
+
+        points = await self._client.retrieve(
+            collection_name=collection_name,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            return None
+
+        existing_point = points[0]
+        payload = dict(existing_point.payload or {})
+        payload["document"] = entry.content
+        if entry.metadata is not None:
+            payload[METADATA_PATH] = entry.metadata
+
+        embeddings = await self._embedding_provider.embed_documents([entry.content])
+        vector_name = self._embedding_provider.get_vector_name()
+        await self._client.upsert(
+            collection_name=collection_name,
+            points=[
+                models.PointStruct(
+                    id=existing_point.id,
+                    vector={vector_name: embeddings[0]},
+                    payload=payload,
+                )
+            ],
+        )
+
+        return Entry(
+            id=_normalize_point_id(existing_point.id),
+            content=entry.content,
+            metadata=payload.get(METADATA_PATH),
+        )
+
+    async def delete(
+        self,
+        point_id: PointId,
+        *,
+        collection_name: str | None = None,
+    ) -> Entry | None:
+        """
+        Delete an existing entry identified by its point ID.
+        :param point_id: The ID of the point to delete.
+        :param collection_name: The collection containing the point, optional. If not provided,
+                                the default collection is used.
+        :return: The deleted entry, or None if the collection or point does not exist.
+        """
+        collection_name = collection_name or self._default_collection_name
+        assert collection_name is not None
+        if not await self._client.collection_exists(collection_name):
+            return None
+
+        points = await self._client.retrieve(
+            collection_name=collection_name,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            return None
+
+        existing_point = points[0]
+        await self._client.delete(
+            collection_name=collection_name,
+            points_selector=models.PointIdsList(points=[existing_point.id]),
+        )
+
+        payload = existing_point.payload or {}
+        return Entry(
+            id=_normalize_point_id(existing_point.id),
+            content=payload["document"],
+            metadata=payload.get(METADATA_PATH),
+        )
 
     async def _ensure_collection_exists(self, collection_name: str):
         """

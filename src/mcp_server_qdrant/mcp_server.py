@@ -11,7 +11,13 @@ from mcp_server_qdrant.common.func_tools import make_partial_function
 from mcp_server_qdrant.common.wrap_filters import wrap_filters
 from mcp_server_qdrant.embeddings.base import EmbeddingProvider
 from mcp_server_qdrant.embeddings.factory import create_embedding_provider
-from mcp_server_qdrant.qdrant import ArbitraryFilter, Entry, Metadata, QdrantConnector
+from mcp_server_qdrant.qdrant import (
+    ArbitraryFilter,
+    Entry,
+    Metadata,
+    PointId,
+    QdrantConnector,
+)
 from mcp_server_qdrant.settings import (
     EmbeddingProviderSettings,
     QdrantSettings,
@@ -82,8 +88,9 @@ class QdrantMCPServer(FastMCP):
         """
         Feel free to override this method in your subclass to customize the format of the entry.
         """
+        entry_id = f"<id>{entry.id}</id>" if entry.id is not None else ""
         entry_metadata = json.dumps(entry.metadata) if entry.metadata else ""
-        return f"<entry><content>{entry.content}</content><metadata>{entry_metadata}</metadata></entry>"
+        return f"<entry>{entry_id}<content>{entry.content}</content><metadata>{entry_metadata}</metadata></entry>"
 
     def setup_tools(self):
         """
@@ -119,10 +126,12 @@ class QdrantMCPServer(FastMCP):
 
             entry = Entry(content=information, metadata=metadata)
 
-            await self.qdrant_connector.store(entry, collection_name=collection_name)
+            point_id = await self.qdrant_connector.store(
+                entry, collection_name=collection_name
+            )
             if collection_name:
-                return f"Remembered: {information} in collection {collection_name}"
-            return f"Remembered: {information}"
+                return f"Remembered with ID {point_id}: {information} in collection {collection_name}"
+            return f"Remembered with ID {point_id}: {information}"
 
         async def find(
             ctx: Context,
@@ -164,8 +173,82 @@ class QdrantMCPServer(FastMCP):
                 content.append(self.format_entry(entry))
             return content
 
+        async def edit(
+            ctx: Context,
+            point_id: Annotated[
+                PointId, Field(description="ID of the memory to update")
+            ],
+            information: Annotated[str, Field(description="Replacement text to store")],
+            collection_name: Annotated[
+                str, Field(description="The collection containing the memory")
+            ],
+            metadata: Annotated[
+                Metadata | None,
+                Field(
+                    description=(
+                        "Replacement metadata for the memory. If omitted, the existing metadata is preserved."
+                    )
+                ),
+            ] = None,
+        ) -> str:
+            """
+            Edit a memory in Qdrant by point ID.
+            :param ctx: The context for the request.
+            :param point_id: The ID of the memory to edit.
+            :param information: The replacement information to store.
+            :param collection_name: The name of the collection containing the memory, optional. If not provided,
+                                    the default collection is used.
+            :param metadata: JSON metadata to store with the replacement information, optional. If omitted,
+                             existing metadata is preserved.
+            :return: A message indicating the outcome of the update.
+            """
+            await ctx.debug(f"Editing memory with ID {point_id}")
+
+            updated_entry = await self.qdrant_connector.edit(
+                point_id,
+                Entry(content=information, metadata=metadata),
+                collection_name=collection_name,
+            )
+            if updated_entry is None:
+                return f"No memory found with ID {point_id}"
+            if collection_name:
+                return (
+                    f"Updated memory with ID {point_id} in collection {collection_name}"
+                )
+            return f"Updated memory with ID {point_id}"
+
+        async def delete(
+            ctx: Context,
+            point_id: Annotated[
+                PointId, Field(description="ID of the memory to delete")
+            ],
+            collection_name: Annotated[
+                str, Field(description="The collection containing the memory")
+            ],
+        ) -> str:
+            """
+            Delete a memory from Qdrant by point ID.
+            :param ctx: The context for the request.
+            :param point_id: The ID of the memory to delete.
+            :param collection_name: The name of the collection containing the memory, optional. If not provided,
+                                    the default collection is used.
+            :return: A message indicating the outcome of the deletion.
+            """
+            await ctx.debug(f"Deleting memory with ID {point_id}")
+
+            deleted_entry = await self.qdrant_connector.delete(
+                point_id, collection_name=collection_name
+            )
+            if deleted_entry is None:
+                return f"No memory found with ID {point_id}"
+            if collection_name:
+                return f"Deleted memory with ID {point_id} from collection {collection_name}"
+            return f"Deleted memory with ID {point_id}"
+
         find_foo = find
         store_foo = store
+        edit_foo = edit
+        delete_foo = delete
 
         filterable_conditions = (
             self.qdrant_settings.filterable_fields_dict_with_conditions()
@@ -183,6 +266,12 @@ class QdrantMCPServer(FastMCP):
             store_foo = make_partial_function(
                 store_foo, {"collection_name": self.qdrant_settings.collection_name}
             )
+            edit_foo = make_partial_function(
+                edit_foo, {"collection_name": self.qdrant_settings.collection_name}
+            )
+            delete_foo = make_partial_function(
+                delete_foo, {"collection_name": self.qdrant_settings.collection_name}
+            )
 
         self.tool(
             find_foo,
@@ -196,4 +285,14 @@ class QdrantMCPServer(FastMCP):
                 store_foo,
                 name="qdrant-store",
                 description=self.tool_settings.tool_store_description,
+            )
+            self.tool(
+                edit_foo,
+                name="qdrant-edit",
+                description=self.tool_settings.tool_edit_description,
+            )
+            self.tool(
+                delete_foo,
+                name="qdrant-delete",
+                description=self.tool_settings.tool_delete_description,
             )
