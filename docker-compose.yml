@@ -1,0 +1,38 @@
+services:
+  mcp-server-qdrant:
+    build: .
+    restart: always
+    depends_on:
+      - qdrant
+    ports:
+      - 8010:8000
+    environment:
+      - FASTMCP_SERVER_HOST=0.0.0.0
+      - QDRANT_URL=http://qdrant:6333
+      - COLLECTION_NAME=personal_memory_v2
+      - EMBEDDING_MODEL=intfloat/multilingual-e5-large
+      - FASTEMBED_CACHE_PATH=/models
+    volumes:
+      # 模型約 2.2 GB，預設放在 /tmp，容器重建就要重新下載
+      - fastembed_cache:/models
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: always
+    container_name: qdrant
+    ports:
+      - 6333:6333
+      - 6334:6334
+    configs:
+      - source: qdrant_config
+        target: /qdrant/config/production.yaml
+    volumes:
+      - ./qdrant_data:/qdrant/storage
+
+volumes:
+  fastembed_cache:
+
+configs:
+  qdrant_config:
+    content: |
+      log_level: INFO
